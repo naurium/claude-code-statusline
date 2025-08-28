@@ -127,14 +127,26 @@ fi
 # Function to update blocks cache with timeout and memory limit
 update_blocks_cache() {
     if [ "$CCUSAGE_AVAILABLE" = true ]; then
-        # Use timeout and memory limits to prevent runaway processes
-        export NODE_OPTIONS="--max-old-space-size=512"
-        if command -v ccusage >/dev/null 2>&1; then
-            ccusage blocks --json 2>>"$ERROR_LOG" > "$BLOCKS_CACHE.tmp" && mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
+        # Use timeout command if available
+        if command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_CMD="gtimeout 30"
+        elif command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_CMD="timeout 30"
         else
-            npx ccusage blocks --json 2>>"$ERROR_LOG" > "$BLOCKS_CACHE.tmp" && mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
+            TIMEOUT_CMD=""
+        fi
+        
+        # Use higher memory limit and timeout for blocks
+        export NODE_OPTIONS="--max-old-space-size=1024"
+        if command -v ccusage >/dev/null 2>&1; then
+            $TIMEOUT_CMD ccusage blocks --json 2>>"$ERROR_LOG" > "$BLOCKS_CACHE.tmp" && mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
+        else
+            $TIMEOUT_CMD npx ccusage blocks --json 2>>"$ERROR_LOG" > "$BLOCKS_CACHE.tmp" && mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
         fi
         unset NODE_OPTIONS
+        
+        # Clean up temp file if it failed
+        rm -f "$BLOCKS_CACHE.tmp" 2>/dev/null
     else
         # Create empty cache to indicate ccusage is not available
         echo '{"blocks":[]}' > "$BLOCKS_CACHE"
@@ -144,14 +156,26 @@ update_blocks_cache() {
 # Function to update daily cache with timeout and memory limit
 update_daily_cache() {
     if [ "$CCUSAGE_AVAILABLE" = true ]; then
-        # Use timeout and memory limits to prevent runaway processes
-        export NODE_OPTIONS="--max-old-space-size=512"
-        if command -v ccusage >/dev/null 2>&1; then
-            ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) 2>>"$ERROR_LOG" > "$DAILY_CACHE.tmp" && mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
+        # Use timeout command if available (60s for daily since it's slower)
+        if command -v gtimeout >/dev/null 2>&1; then
+            TIMEOUT_CMD="gtimeout 60"
+        elif command -v timeout >/dev/null 2>&1; then
+            TIMEOUT_CMD="timeout 60"
         else
-            npx ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) 2>>"$ERROR_LOG" > "$DAILY_CACHE.tmp" && mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
+            TIMEOUT_CMD=""
+        fi
+        
+        # Use higher memory limit and timeout for daily
+        export NODE_OPTIONS="--max-old-space-size=1024"
+        if command -v ccusage >/dev/null 2>&1; then
+            $TIMEOUT_CMD ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) 2>>"$ERROR_LOG" > "$DAILY_CACHE.tmp" && mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
+        else
+            $TIMEOUT_CMD npx ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) 2>>"$ERROR_LOG" > "$DAILY_CACHE.tmp" && mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
         fi
         unset NODE_OPTIONS
+        
+        # Clean up temp file if it failed
+        rm -f "$DAILY_CACHE.tmp" 2>/dev/null
     else
         # Create empty cache to indicate ccusage is not available  
         echo '{"totals":{"totalCost":0}}' > "$DAILY_CACHE"
@@ -164,6 +188,13 @@ if [ ! -f "$BLOCKS_CACHE" ]; then
 else
     cache_age=$(($(date +%s) - $(stat -f %m "$BLOCKS_CACHE" 2>/dev/null || echo 0)))
     if [ "$cache_age" -gt "$CACHE_AGE" ]; then
+        # Clean up stale locks older than 60 seconds
+        if [ -d "$LOCKFILE.blocks" ]; then
+            lock_age=$(($(date +%s) - $(stat -f %m "$LOCKFILE.blocks" 2>/dev/null || echo 0)))
+            if [ "$lock_age" -gt 60 ]; then
+                rmdir "$LOCKFILE.blocks" 2>/dev/null
+            fi
+        fi
         # Use lockfile to prevent multiple simultaneous updates
         if mkdir "$LOCKFILE.blocks" 2>/dev/null; then
             (
@@ -181,6 +212,13 @@ if [ ! -f "$DAILY_CACHE" ]; then
 else
     cache_age=$(($(date +%s) - $(stat -f %m "$DAILY_CACHE" 2>/dev/null || echo 0)))
     if [ "$cache_age" -gt "$CACHE_AGE" ]; then
+        # Clean up stale locks older than 60 seconds
+        if [ -d "$LOCKFILE.daily" ]; then
+            lock_age=$(($(date +%s) - $(stat -f %m "$LOCKFILE.daily" 2>/dev/null || echo 0)))
+            if [ "$lock_age" -gt 60 ]; then
+                rmdir "$LOCKFILE.daily" 2>/dev/null
+            fi
+        fi
         # Use lockfile to prevent multiple simultaneous updates
         if mkdir "$LOCKFILE.daily" 2>/dev/null; then
             (

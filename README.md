@@ -36,9 +36,10 @@ cd claude-code-statusline
 
 2. Copy scripts to your Claude directory:
 ```bash
-cp statusline.sh processing-tracker.sh ~/.claude/
+cp statusline.sh processing-tracker.sh update-cache.sh ~/.claude/
 chmod +x ~/.claude/statusline.sh
 chmod +x ~/.claude/processing-tracker.sh
+chmod +x ~/.claude/update-cache.sh
 ```
 
 3. Update Claude settings (`~/.claude/settings.json`):
@@ -69,6 +70,14 @@ ccusage login
 ```
 
 Without ccusage, the status line will partially work but show `0` for tokens and costs.
+
+## Performance
+
+Token and cost data is cached for 5 minutes to minimize system load. All Claude instances share the same cache, so only one update runs at a time. To manually refresh all cached data, run:
+
+```bash
+bash ~/.claude/update-cache.sh
+```
 
 ## License
 
