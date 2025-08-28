@@ -71,9 +71,16 @@ ccusage login
 
 Without ccusage, the status line will partially work but show `0` for tokens and costs.
 
-## Performance
+## Performance & Caching
 
-Token and cost data is cached for 5 minutes to minimize system load. All Claude instances share the same cache, so only one update runs at a time. To manually refresh all cached data, run:
+The statusline uses intelligent caching to minimize system load:
+
+- **Session data** (tokens, cost): Updates every 2 minutes
+- **Daily totals**: Updates every 5 minutes  
+- **Non-blocking**: Status displays instantly while updates run in background
+- **Shared cache**: All Claude instances use the same cache files
+
+To manually refresh all cached data:
 
 ```bash
 bash ~/.claude/update-cache.sh

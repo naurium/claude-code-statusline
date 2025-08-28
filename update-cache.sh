@@ -5,29 +5,39 @@
 
 echo "Updating all cached data..."
 
-export NODE_OPTIONS="--max-old-space-size=4096"  # 4GB for manual updates
+BLOCKS_CACHE="/tmp/ccusage_blocks_cache.json"
+DAILY_CACHE="/tmp/ccusage_daily_cache.json"
+BLOCKS_LOCK="/tmp/ccusage_blocks.lock"
+DAILY_LOCK="/tmp/ccusage_daily.lock"
 
-# Use longer timeout for manual updates
+# Clean up any existing locks
+rm -f "$BLOCKS_LOCK" "$DAILY_LOCK" 2>/dev/null
+
+export NODE_OPTIONS="--max-old-space-size=2048"
+
+# Determine timeout command
 if command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout 60"
-elif command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout 60"
+    TIMEOUT_CMD="gtimeout"
 else
     TIMEOUT_CMD=""
 fi
 
-BLOCKS_CACHE="/tmp/ccusage_blocks_cache.json"
-DAILY_CACHE="/tmp/ccusage_daily_cache.json"
-
+# Determine ccusage command
 if command -v ccusage >/dev/null 2>&1; then
     CMD="ccusage"
 else
     CMD="npx ccusage"
 fi
 
-# Update blocks cache
+# Update blocks cache (30 second timeout)
 echo "Updating blocks cache..."
-if $TIMEOUT_CMD $CMD blocks --json > "$BLOCKS_CACHE.tmp" 2>&1; then
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD 30 $CMD blocks --json > "$BLOCKS_CACHE.tmp" 2>/dev/null
+else
+    $CMD blocks --json > "$BLOCKS_CACHE.tmp" 2>/dev/null
+fi
+
+if [ -s "$BLOCKS_CACHE.tmp" ]; then
     mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
     echo "✅ Blocks cache updated"
 else
@@ -35,9 +45,15 @@ else
     rm -f "$BLOCKS_CACHE.tmp"
 fi
 
-# Update daily cache
+# Update daily cache (45 second timeout)
 echo "Updating daily cache..."
-if $TIMEOUT_CMD $CMD daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>&1; then
+if [ -n "$TIMEOUT_CMD" ]; then
+    $TIMEOUT_CMD 45 $CMD daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>/dev/null
+else
+    $CMD daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>/dev/null
+fi
+
+if [ -s "$DAILY_CACHE.tmp" ]; then
     mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
     echo "✅ Daily cache updated"
 else
