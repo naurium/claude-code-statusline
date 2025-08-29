@@ -2,8 +2,6 @@
 
 # Cleanup function to remove lock files and old session files
 cleanup() {
-    # Clean up lock files
-    rm -f /tmp/ccusage_blocks.lock /tmp/ccusage_daily.lock 2>/dev/null
     # Clean up old session files (older than 24 hours)
     find /tmp -name "claude_processing_start_*.timestamp" -mtime +1 -delete 2>/dev/null
 }
@@ -89,137 +87,70 @@ else
     processing_time_display="..."
 fi
 
-# Cache file for ccusage blocks data 
+# Cache files
 BLOCKS_CACHE="/tmp/ccusage_blocks_cache.json"
 DAILY_CACHE="/tmp/ccusage_daily_cache.json"
-ERROR_LOG="/tmp/statusline-errors.log"
 BLOCKS_CACHE_AGE=120  # 2 minutes for session data
 DAILY_CACHE_AGE=300   # 5 minutes for daily totals
-BLOCKS_LOCK="/tmp/ccusage_blocks.lock"
-DAILY_LOCK="/tmp/ccusage_daily.lock"
 
-# Rotate error log if it gets too large (>10MB)
-if [ -f "$ERROR_LOG" ]; then
-    log_size=$(stat -f%z "$ERROR_LOG" 2>/dev/null || echo 0)
-    if [ "$log_size" -gt 10485760 ]; then
-        mv "$ERROR_LOG" "$ERROR_LOG.old"
-        touch "$ERROR_LOG"
-    fi
-fi
-
-# Check if ccusage is available
-CCUSAGE_AVAILABLE=false
-if command -v ccusage >/dev/null 2>&1; then
-    CCUSAGE_AVAILABLE=true
-elif command -v npx >/dev/null 2>&1; then
-    # Check if ccusage is available via npx with timeout to prevent hanging
-    if command -v gtimeout >/dev/null 2>&1; then
-        if gtimeout 2 npx ccusage --help >/dev/null 2>&1; then
-            CCUSAGE_AVAILABLE=true
-        fi
-    elif command -v timeout >/dev/null 2>&1; then
-        if timeout 2 npx ccusage --help >/dev/null 2>&1; then
-            CCUSAGE_AVAILABLE=true
-        fi
-    else
-        # Skip npx check if no timeout command available (to prevent hanging)
-        CCUSAGE_AVAILABLE=false
-    fi
-fi
-
-# Simple async update function for blocks cache
-start_blocks_update() {
-    if [ "$CCUSAGE_AVAILABLE" = true ] && [ ! -f "$BLOCKS_LOCK" ]; then
-        (
-            # Create lock file
-            touch "$BLOCKS_LOCK"
-            
-            # Run update with reasonable timeout
-            export NODE_OPTIONS="--max-old-space-size=1024"
-            if command -v gtimeout >/dev/null 2>&1; then
-                gtimeout 30 ccusage blocks --json > "$BLOCKS_CACHE.tmp" 2>/dev/null
-            elif command -v ccusage >/dev/null 2>&1; then
-                ccusage blocks --json > "$BLOCKS_CACHE.tmp" 2>/dev/null
-            else
-                npx ccusage blocks --json > "$BLOCKS_CACHE.tmp" 2>/dev/null
-            fi
-            
-            # If successful and non-empty, replace cache
-            if [ -s "$BLOCKS_CACHE.tmp" ]; then
-                mv "$BLOCKS_CACHE.tmp" "$BLOCKS_CACHE"
-            fi
-            
-            # Clean up
-            rm -f "$BLOCKS_CACHE.tmp" "$BLOCKS_LOCK" 2>/dev/null
-        ) &
-    fi
-}
-
-# Simple async update function for daily cache
-start_daily_update() {
-    if [ "$CCUSAGE_AVAILABLE" = true ] && [ ! -f "$DAILY_LOCK" ]; then
-        (
-            # Create lock file
-            touch "$DAILY_LOCK"
-            
-            # Run update with reasonable timeout (daily is slower)
-            export NODE_OPTIONS="--max-old-space-size=1024"
-            if command -v gtimeout >/dev/null 2>&1; then
-                gtimeout 45 ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>/dev/null
-            elif command -v ccusage >/dev/null 2>&1; then
-                ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>/dev/null
-            else
-                npx ccusage daily --json --since $(date +%Y%m%d) --until $(date +%Y%m%d) > "$DAILY_CACHE.tmp" 2>/dev/null
-            fi
-            
-            # If successful and non-empty, replace cache
-            if [ -s "$DAILY_CACHE.tmp" ]; then
-                mv "$DAILY_CACHE.tmp" "$DAILY_CACHE"
-            fi
-            
-            # Clean up
-            rm -f "$DAILY_CACHE.tmp" "$DAILY_LOCK" 2>/dev/null
-        ) &
-    fi
-}
-
-# Clean up orphaned locks (older than 60 seconds)
-if [ -f "$BLOCKS_LOCK" ]; then
-    lock_age=$(($(date +%s) - $(stat -f %m "$BLOCKS_LOCK" 2>/dev/null || echo 0)))
-    if [ "$lock_age" -gt 60 ]; then
-        rm -f "$BLOCKS_LOCK"
-    fi
-fi
-if [ -f "$DAILY_LOCK" ]; then
-    lock_age=$(($(date +%s) - $(stat -f %m "$DAILY_LOCK" 2>/dev/null || echo 0)))
-    if [ "$lock_age" -gt 60 ]; then
-        rm -f "$DAILY_LOCK"
-    fi
-fi
+# Path to update-cache.sh script
+UPDATE_SCRIPT="$HOME/.claude/update-cache.sh"
 
 # Check if blocks cache needs update (2 minute interval)
 if [ ! -f "$BLOCKS_CACHE" ]; then
     # No cache, create empty one and trigger update
     echo '{"blocks":[]}' > "$BLOCKS_CACHE"
-    start_blocks_update
+    if [ -x "$UPDATE_SCRIPT" ]; then
+        "$UPDATE_SCRIPT" --quiet --blocks-only &
+    fi
 else
     # Check cache age
     cache_age=$(($(date +%s) - $(stat -f %m "$BLOCKS_CACHE" 2>/dev/null || echo 0)))
     if [ "$cache_age" -gt "$BLOCKS_CACHE_AGE" ]; then
-        start_blocks_update
+        if [ -x "$UPDATE_SCRIPT" ]; then
+            "$UPDATE_SCRIPT" --quiet --blocks-only &
+        fi
     fi
 fi
 
-# Check if daily cache needs update (5 minute interval)
+# Check if daily cache needs update (5 minute interval OR date change)
+needs_daily_update=false
 if [ ! -f "$DAILY_CACHE" ]; then
     # No cache, create empty one and trigger update
     echo '{"totals":{"totalCost":0,"totalTokens":0}}' > "$DAILY_CACHE"
-    start_daily_update
+    needs_daily_update=true
 else
     # Check cache age
     cache_age=$(($(date +%s) - $(stat -f %m "$DAILY_CACHE" 2>/dev/null || echo 0)))
     if [ "$cache_age" -gt "$DAILY_CACHE_AGE" ]; then
-        start_daily_update
+        needs_daily_update=true
+    else
+        # Check if the cached date matches today's date
+        cached_date=$(python3 -c "
+import json
+try:
+    with open('$DAILY_CACHE', 'r') as f:
+        data = json.load(f)
+    # Get the date from the daily data
+    daily_entries = data.get('daily', [])
+    if daily_entries:
+        print(daily_entries[0].get('date', ''))
+except:
+    pass
+" 2>/dev/null)
+        
+        today_date=$(date +%Y-%m-%d)
+        if [ "$cached_date" != "$today_date" ] && [ -n "$cached_date" ]; then
+            # Date has changed, force update
+            needs_daily_update=true
+        fi
+    fi
+fi
+
+# Trigger daily update if needed
+if [ "$needs_daily_update" = true ]; then
+    if [ -x "$UPDATE_SCRIPT" ]; then
+        "$UPDATE_SCRIPT" --quiet --daily-only &
     fi
 fi
 
@@ -247,217 +178,176 @@ try:
                 # Block has an end time - check if it's in the past or future
                 try:
                     if end_time.endswith('Z'):
-                        end = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                        # Parse ISO format with Z timezone
+                        end_dt = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
                     else:
-                        end = datetime.datetime.fromisoformat(end_time)
+                        # Parse ISO format
+                        end_dt = datetime.datetime.fromisoformat(end_time)
                     
-                    now = datetime.datetime.now(datetime.timezone.utc)
+                    # Get current UTC time
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
                     
-                    if end > now:
-                        # End time is in the future - this is a pre-allocated block, still active
-                        # Calculate time from start (this is the current session)
-                        start_time = block.get('startTime', '')
-                        if start_time:
-                            if start_time.endswith('Z'):
-                                start = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                            else:
-                                start = datetime.datetime.fromisoformat(start_time)
-                            
-                            duration = now - start
-                            if duration.total_seconds() >= 0:
-                                # Don't cap at 5 hours since this is the NEW session after reset
-                                hours = int(duration.total_seconds() // 3600)
-                                minutes = int((duration.total_seconds() % 3600) // 60)
-                            else:
-                                hours = 0
-                                minutes = 0
-                        else:
-                            hours = 0
-                            minutes = 0
-                    else:
-                        # End time is in the past - session truly ended
-                        hours = 0
-                        minutes = 0
-                except Exception as e:
-                    print(f'End time parsing error: {e}', file=sys.stderr)
-                    hours = 0
-                    minutes = 0
-            else:
-                # Calculate session time from start
-                try:
-                    start_time = block.get('startTime', '')
-                    if start_time:
-                        # Handle both formats: with and without timezone
-                        if start_time.endswith('Z'):
-                            start = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                        else:
-                            start = datetime.datetime.fromisoformat(start_time)
-                        
-                        now = datetime.datetime.now(datetime.timezone.utc)
-                        duration = now - start
-                        
-                        # Ensure positive duration and cap at 5 hours
-                        if duration.total_seconds() >= 0:
-                            total_seconds = min(duration.total_seconds(), 5 * 3600)  # Cap at 5 hours
-                            hours = int(total_seconds // 3600)
-                            minutes = int((total_seconds % 3600) // 60)
-                        else:
-                            hours = 0
-                            minutes = 0
-                    else:
-                        hours = 0
-                        minutes = 0
-                except Exception as time_err:
-                    print(f'Time calculation error: {time_err}', file=sys.stderr)
-                    hours = 0
-                    minutes = 0
+                    # If end_time is in the future, this is a pre-allocated block
+                    # ccusage marks blocks with future endTime when 5-hour limit is hit
+                    if end_dt > now_utc:
+                        # Block is pre-allocated (5-hour limit hit), don't use its data
+                        continue
+                except:
+                    # If we can't parse the time, assume block is active
+                    pass
             
-            print(f'{tokens}|{cost:.2f}|{hours}|{minutes}')
+            # Valid active block found
+            print(f'{tokens},{cost}')
             found_active = True
             break
     
     if not found_active:
-        # No active block, try to get last non-gap block
-        non_gap_blocks = [b for b in data.get('blocks', []) if not b.get('isGap', False)]
-        if non_gap_blocks:
-            last = non_gap_blocks[-1]
-            tokens = last.get('totalTokens', 0)
-            cost = last.get('costUSD', 0)
-            print(f'{tokens}|{cost:.2f}|0|0')
-        else:
-            print('0|0.00|0|0')
-            
-except FileNotFoundError:
-    print('Cache file not found', file=sys.stderr)
-    print('0|0.00|0|0')
-except json.JSONDecodeError as je:
-    print(f'JSON decode error: {je}', file=sys.stderr)
-    print('0|0.00|0|0')
+        print('0,0')
+        
 except Exception as e:
-    print(f'Unexpected error: {e}', file=sys.stderr)
-    traceback.print_exc(file=sys.stderr)
-    print('0|0.00|0|0')
-" 2>>"$ERROR_LOG")
+    # On error, output zeros
+    print('0,0')
+" 2>/dev/null)
     
     # Parse the output
-    IFS='|' read -r total_tokens session_cost hours minutes <<< "$block_data"
-    
-    # Default values if parsing fails
-    total_tokens=${total_tokens:-0}
-    session_cost=${session_cost:-0.00}
-    hours=${hours:-0}
-    minutes=${minutes:-0}
+    if [ -n "$block_data" ]; then
+        tokens=$(echo "$block_data" | cut -d',' -f1)
+        session_cost=$(echo "$block_data" | cut -d',' -f2)
+    else
+        tokens=0
+        session_cost=0
+    fi
 else
-    # No cache, use defaults
-    total_tokens=0
-    session_cost=0.00
-    hours=0
-    minutes=0
+    tokens=0
+    session_cost=0
 fi
 
-# Parse daily cost from ccusage daily
+# Parse cached daily data
 if [ -f "$DAILY_CACHE" ]; then
     daily_cost=$(python3 -c "
-import json, sys
-
+import json
 try:
     with open('$DAILY_CACHE', 'r') as f:
         data = json.load(f)
-    totals = data.get('totals', {})
-    cost = totals.get('totalCost', 0)
-    print(f'{cost:.2f}')
-except Exception as e:
-    print(f'Error reading daily cache: {e}', file=sys.stderr)
-    print('0.00')
-" 2>>"$ERROR_LOG")
-    daily_cost=${daily_cost:-0.00}
+    print(data.get('totals', {}).get('totalCost', 0))
+except:
+    print(0)
+" 2>/dev/null)
 else
-    daily_cost="0.00"
+    daily_cost=0
 fi
 
-# Get git branch
-git_branch=$(cd "$current_dir" 2>/dev/null && git branch --show-current 2>/dev/null || echo "")
-if [ -z "$git_branch" ]; then
-    git_branch="none"
-fi
+# Calculate session time
+if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    # Get session start time from transcript
+    session_start=$(python3 -c "
+import json, sys
+try:
+    with open('$transcript_path', 'r') as f:
+        data = json.load(f)
+    messages = data.get('messages', [])
+    if messages:
+        # Get the timestamp of the first message
+        first_msg = messages[0]
+        timestamp = first_msg.get('ts', None)
+        if timestamp:
+            # Convert ISO timestamp to epoch seconds
+            from datetime import datetime
+            dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            epoch = int(dt.timestamp())
+            print(epoch)
+except:
+    pass
+" 2>/dev/null)
+    
+    if [ -n "$session_start" ]; then
+        current_time=$(date +%s)
+        session_elapsed=$((current_time - session_start))
+        
+        # Check if the active block has ended (5-hour limit)
+        # If block has future endTime, session was restarted, so calculate from restart
+        if [ -f "$BLOCKS_CACHE" ]; then
+            restart_time=$(python3 -c "
+import json, datetime
 
-# Get folder name
-folder_name=$(basename "$current_dir")
-
-# Format tokens for display with appropriate suffix
-if [ "$total_tokens" -gt 0 ]; then
-    if [ "$total_tokens" -ge 1000000000 ]; then
-        # Billions
-        tokens_b=$((total_tokens / 1000000000))
-        tokens_display="${tokens_b}B"
-    elif [ "$total_tokens" -ge 1000000 ]; then
-        # Millions
-        tokens_m=$((total_tokens / 1000000))
-        tokens_display="${tokens_m}M"
-    elif [ "$total_tokens" -ge 1000 ]; then
-        # Thousands
-        tokens_k=$((total_tokens / 1000))
-        tokens_display="${tokens_k}k"
-    else
-        # Raw number
-        tokens_display="${total_tokens}"
-    fi
-else
-    tokens_display="0"
-fi
-
-# Format session time (compact format)
-if [ "$hours" -gt 0 ] || [ "$minutes" -gt 0 ]; then
-    if [ "$hours" -gt 0 ]; then
-        if [ "$minutes" -gt 0 ]; then
-            session_time="${hours}h${minutes}m"
+try:
+    with open('$BLOCKS_CACHE', 'r') as f:
+        data = json.load(f)
+    
+    # Find active block with future endTime (indicates restart)
+    for block in data.get('blocks', []):
+        if block.get('isActive'):
+            end_time = block.get('endTime', '')
+            if end_time:
+                try:
+                    if end_time.endswith('Z'):
+                        end_dt = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                    else:
+                        end_dt = datetime.datetime.fromisoformat(end_time)
+                    
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    
+                    # If end_time is in the future, session was restarted
+                    if end_dt > now_utc:
+                        # Calculate when session restarted (5 hours before the future endTime)
+                        restart_dt = end_dt - datetime.timedelta(hours=5)
+                        print(int(restart_dt.timestamp()))
+                        break
+                except:
+                    pass
+except:
+    pass
+" 2>/dev/null)
+            
+            if [ -n "$restart_time" ]; then
+                # Use restart time instead of original session start
+                session_elapsed=$((current_time - restart_time))
+            fi
+        fi
+        
+        # Format session time
+        if [ "$session_elapsed" -ge 0 ]; then
+            hours=$((session_elapsed / 3600))
+            minutes=$(((session_elapsed % 3600) / 60))
+            
+            if [ "$hours" -eq 0 ]; then
+                session_time="${minutes}m"
+            else
+                session_time="${hours}h${minutes}m"
+            fi
         else
-            session_time="${hours}h"
+            session_time="0m"
         fi
     else
-        session_time="${minutes}m"
+        session_time="0m"
     fi
 else
     session_time="0m"
 fi
 
-# Format session cost (rounded to nearest dollar)
-if [ -n "$session_cost" ] && [ "$session_cost" != "0.00" ]; then
-    # Round to nearest dollar, but show at least $1 if there's any cost
-    session_cost_int=$(python3 -c "import math; print(round($session_cost))" 2>>"$ERROR_LOG")
-    session_cost_int=${session_cost_int:-1}
-    if [ "$session_cost_int" -eq 0 ] && [ "$session_cost" != "0.00" ]; then
-        session_cost_display="1"
-    else
-        session_cost_display="${session_cost_int}"
-    fi
+# Format tokens (k/M/B)
+if [ "$tokens" -ge 1000000000 ]; then
+    tokens_display=$((tokens / 1000000000))"B"
+elif [ "$tokens" -ge 1000000 ]; then
+    tokens_display=$((tokens / 1000000))"M"
+elif [ "$tokens" -ge 1000 ]; then
+    tokens_display=$((tokens / 1000))"k"
 else
-    session_cost_display="0"
+    tokens_display="$tokens"
 fi
 
-# Format daily cost (also rounded to nearest, since they should match when it's the only session)
-if [ -n "$daily_cost" ] && [ "$daily_cost" != "0.00" ]; then
-    # Round to nearest dollar for consistency with session
-    daily_cost_int=$(python3 -c "import math; print(round($daily_cost))" 2>>"$ERROR_LOG")
-    daily_cost_int=${daily_cost_int:-1}
-    if [ "$daily_cost_int" -eq 0 ] && [ "$daily_cost" != "0.00" ]; then
-        daily_cost_display="1"
-    else
-        daily_cost_display="${daily_cost_int}"
-    fi
-else
-    daily_cost_display="0"
-fi
+# Format costs (round to nearest dollar)
+session_cost_display=$(printf "%.0f" "$session_cost" 2>/dev/null || echo "0")
+daily_cost_display=$(printf "%.0f" "$daily_cost" 2>/dev/null || echo "0")
 
-# Format the status line with processing time FIRST using sparkles
-# ✨12s 🤖Sonnet 4 ⏱️ 1h36m 🪙11k 💰$14 📅$15 🌿xxx 📁xxx
-# Using ✨ sparkles for active processing - magic happening!
-printf "✨%s 🤖%s ⏱️ %s 🪙%s 💰\$%s 📅\$%s 🌿%s 📁%s" \
-    "$processing_time_display" \
-    "$model_name" \
-    "$session_time" \
-    "$tokens_display" \
-    "$session_cost_display" \
-    "$daily_cost_display" \
-    "$git_branch" \
-    "$folder_name"
+# Get git branch
+git_branch=$(cd "$current_dir" 2>/dev/null && git branch --show-current 2>/dev/null | head -c 20)
+git_branch=${git_branch:-"no-git"}
+
+# Get directory name (last component of path)
+dir_name=$(basename "$current_dir" | head -c 20)
+
+# Build status line
+status="✨${processing_time_display} 🤖${model_name} ⏱️${session_time} 🪙${tokens_display} 💰\$${session_cost_display} 📅\$${daily_cost_display} 🌿${git_branch} 📁${dir_name}"
+
+echo "$status"
