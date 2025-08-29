@@ -75,8 +75,8 @@ Without ccusage, the status line will partially work but show `0` for tokens and
 
 The statusline uses intelligent caching to minimize system load:
 
-- **Session data** (tokens, cost): Updates every 2 minutes
-- **Daily totals**: Updates every 5 minutes  
+- **Unified updates**: Session and daily data update together every 5 minutes
+- **Data consistency**: Daily cost always ≥ session cost (no confusion)
 - **Non-blocking**: Status displays instantly while updates run in background
 - **Shared cache**: All Claude instances use the same cache files
 

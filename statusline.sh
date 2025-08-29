@@ -90,42 +90,27 @@ fi
 # Cache files
 BLOCKS_CACHE="/tmp/ccusage_blocks_cache.json"
 DAILY_CACHE="/tmp/ccusage_daily_cache.json"
-BLOCKS_CACHE_AGE=120  # 2 minutes for session data
-DAILY_CACHE_AGE=300   # 5 minutes for daily totals
+CACHE_AGE=300  # 5 minutes for both session and daily data (updated together)
 
 # Path to update-cache.sh script
 UPDATE_SCRIPT="$HOME/.claude/update-cache.sh"
 
-# Check if blocks cache needs update (2 minute interval)
-if [ ! -f "$BLOCKS_CACHE" ]; then
-    # No cache, create empty one and trigger update
-    echo '{"blocks":[]}' > "$BLOCKS_CACHE"
-    if [ -x "$UPDATE_SCRIPT" ]; then
-        "$UPDATE_SCRIPT" --quiet --blocks-only &
-    fi
-else
-    # Check cache age
-    cache_age=$(($(date +%s) - $(stat -f %m "$BLOCKS_CACHE" 2>/dev/null || echo 0)))
-    if [ "$cache_age" -gt "$BLOCKS_CACHE_AGE" ]; then
-        if [ -x "$UPDATE_SCRIPT" ]; then
-            "$UPDATE_SCRIPT" --quiet --blocks-only &
-        fi
-    fi
-fi
+# Check if cache needs update (both blocks and daily together)
+needs_update=false
 
-# Check if daily cache needs update (5 minute interval OR date change)
-needs_daily_update=false
-if [ ! -f "$DAILY_CACHE" ]; then
-    # No cache, create empty one and trigger update
-    echo '{"totals":{"totalCost":0,"totalTokens":0}}' > "$DAILY_CACHE"
-    needs_daily_update=true
+# Check if either cache file is missing
+if [ ! -f "$BLOCKS_CACHE" ] || [ ! -f "$DAILY_CACHE" ]; then
+    # Missing cache file(s), need update
+    [ ! -f "$BLOCKS_CACHE" ] && echo '{"blocks":[]}' > "$BLOCKS_CACHE"
+    [ ! -f "$DAILY_CACHE" ] && echo '{"totals":{"totalCost":0,"totalTokens":0}}' > "$DAILY_CACHE"
+    needs_update=true
 else
-    # Check cache age
-    cache_age=$(($(date +%s) - $(stat -f %m "$DAILY_CACHE" 2>/dev/null || echo 0)))
-    if [ "$cache_age" -gt "$DAILY_CACHE_AGE" ]; then
-        needs_daily_update=true
+    # Check cache age (both update together, so check blocks cache age)
+    cache_age=$(($(date +%s) - $(stat -f %m "$BLOCKS_CACHE" 2>/dev/null || echo 0)))
+    if [ "$cache_age" -gt "$CACHE_AGE" ]; then
+        needs_update=true
     else
-        # Check if the cached date matches today's date
+        # Check if the cached date matches today's date (date boundary check)
         cached_date=$(python3 -c "
 import json
 try:
@@ -142,15 +127,15 @@ except:
         today_date=$(date +%Y-%m-%d)
         if [ "$cached_date" != "$today_date" ] && [ -n "$cached_date" ]; then
             # Date has changed, force update
-            needs_daily_update=true
+            needs_update=true
         fi
     fi
 fi
 
-# Trigger daily update if needed
-if [ "$needs_daily_update" = true ]; then
+# Trigger update if needed (updates both blocks and daily sequentially)
+if [ "$needs_update" = true ]; then
     if [ -x "$UPDATE_SCRIPT" ]; then
-        "$UPDATE_SCRIPT" --quiet --daily-only &
+        "$UPDATE_SCRIPT" --quiet &  # No flags = update both sequentially
     fi
 fi
 
