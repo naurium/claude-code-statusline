@@ -150,38 +150,14 @@ try:
     with open('$BLOCKS_CACHE', 'r') as f:
         data = json.load(f)
     
-    # Find active block - but check if it has ended (5-hour limit hit)
+    # Find active block
     found_active = False
     for block in data.get('blocks', []):
         if block.get('isActive'):
             tokens = block.get('totalTokens', 0)
             cost = block.get('costUSD', 0)
-            end_time = block.get('endTime', '')
             
-            # Check if block has an endTime
-            if end_time:
-                # Block has an end time - check if it's in the past or future
-                try:
-                    if end_time.endswith('Z'):
-                        # Parse ISO format with Z timezone
-                        end_dt = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-                    else:
-                        # Parse ISO format
-                        end_dt = datetime.datetime.fromisoformat(end_time)
-                    
-                    # Get current UTC time
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    
-                    # If end_time is in the future, this is a pre-allocated block
-                    # ccusage marks blocks with future endTime when 5-hour limit is hit
-                    if end_dt > now_utc:
-                        # Block is pre-allocated (5-hour limit hit), don't use its data
-                        continue
-                except:
-                    # If we can't parse the time, assume block is active
-                    pass
-            
-            # Valid active block found
+            # Active block found - use its data
             print(f'{tokens},{cost}')
             found_active = True
             break
@@ -223,8 +199,10 @@ else
 fi
 
 # Calculate session time
+session_start=""
+
+# Try to get session start from transcript first
 if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-    # Get session start time from transcript
     session_start=$(python3 -c "
 import json, sys
 try:
@@ -244,64 +222,51 @@ try:
 except:
     pass
 " 2>/dev/null)
-    
-    if [ -n "$session_start" ]; then
-        current_time=$(date +%s)
-        session_elapsed=$((current_time - session_start))
-        
-        # Check if the active block has ended (5-hour limit)
-        # If block has future endTime, session was restarted, so calculate from restart
-        if [ -f "$BLOCKS_CACHE" ]; then
-            restart_time=$(python3 -c "
+fi
+
+# If no transcript, try to get start time from active block
+if [ -z "$session_start" ] && [ -f "$BLOCKS_CACHE" ]; then
+    session_start=$(python3 -c "
 import json, datetime
 
 try:
     with open('$BLOCKS_CACHE', 'r') as f:
         data = json.load(f)
     
-    # Find active block with future endTime (indicates restart)
+    # Find active block's start time
     for block in data.get('blocks', []):
         if block.get('isActive'):
-            end_time = block.get('endTime', '')
-            if end_time:
+            start_time = block.get('startTime', '')
+            if start_time:
                 try:
-                    if end_time.endswith('Z'):
-                        end_dt = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                    if start_time.endswith('Z'):
+                        start_dt = datetime.datetime.fromisoformat(start_time.replace('Z', '+00:00'))
                     else:
-                        end_dt = datetime.datetime.fromisoformat(end_time)
+                        start_dt = datetime.datetime.fromisoformat(start_time)
                     
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    
-                    # If end_time is in the future, session was restarted
-                    if end_dt > now_utc:
-                        # Calculate when session restarted (5 hours before the future endTime)
-                        restart_dt = end_dt - datetime.timedelta(hours=5)
-                        print(int(restart_dt.timestamp()))
-                        break
+                    print(int(start_dt.timestamp()))
+                    break
                 except:
                     pass
 except:
     pass
 " 2>/dev/null)
-            
-            if [ -n "$restart_time" ]; then
-                # Use restart time instead of original session start
-                session_elapsed=$((current_time - restart_time))
-            fi
-        fi
+fi
+
+# Calculate and format session time
+if [ -n "$session_start" ]; then
+    current_time=$(date +%s)
+    session_elapsed=$((current_time - session_start))
+    
+    # Format session time
+    if [ "$session_elapsed" -ge 0 ]; then
+        hours=$((session_elapsed / 3600))
+        minutes=$(((session_elapsed % 3600) / 60))
         
-        # Format session time
-        if [ "$session_elapsed" -ge 0 ]; then
-            hours=$((session_elapsed / 3600))
-            minutes=$(((session_elapsed % 3600) / 60))
-            
-            if [ "$hours" -eq 0 ]; then
-                session_time="${minutes}m"
-            else
-                session_time="${hours}h${minutes}m"
-            fi
+        if [ "$hours" -eq 0 ]; then
+            session_time="${minutes}m"
         else
-            session_time="0m"
+            session_time="${hours}h${minutes}m"
         fi
     else
         session_time="0m"
@@ -333,6 +298,6 @@ git_branch=${git_branch:-"no-git"}
 dir_name=$(basename "$current_dir" | head -c 20)
 
 # Build status line
-status="✨${processing_time_display} 🤖${model_name} ⏱️${session_time} 🪙${tokens_display} 💰\$${session_cost_display} 📅\$${daily_cost_display} 🌿${git_branch} 📁${dir_name}"
+status="✨${processing_time_display} 🤖${model_name} ⏱️ ${session_time} 🪙${tokens_display} 💰\$${session_cost_display} 📅\$${daily_cost_display} 🌿${git_branch} 📁${dir_name}"
 
 echo "$status"
